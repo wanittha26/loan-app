@@ -297,12 +297,12 @@ const addM=(s,k)=>{const[y,m,d]=s.split('-').map(Number);const t=new Date(Date.U
 // ตารางดอกเบี้ยรายเดือน: ดอกเบี้ย/เดือน = เงินต้นกลุ่มหลัก x อัตรา/ปี / 12 นับทุกงวดที่เริ่มแล้วถึงวันนี้
 function sched(l){
  const rows=[],D_=isDay(l);let cum=0;
- const push=(r,i,s,e,over)=>{const P=prin(l,i),d=days(s,e),a=D_?dayInt(P,r.rate,s,e):P*r.rate/100/12;cum+=a;rows.push({key:s,mo:D_?moLabel(s):'',n:rows.length+1,s,e,d,P,rate:r.rate,a,cum,cur:s<=todayS&&todayS<e,over,round:r.label})};
+ const push=(r,i,s,e,over)=>{const P=prin(l,i),d=days(s,e),a=D_?dayInt(P,r.rate,s,e):P*r.rate/100/12;cum+=a;rows.push({key:s,mo:'',n:rows.length+1,s,e,d,P,rate:r.rate,a,cum,cur:s<=todayS&&todayS<e,over,round:r.label})};
  let stop=false;
  l.rounds.forEach((x,i)=>{
   if(stop||!x.start||!x.end)return;
   if(D_){
-   for(let s=x.start,g=0;s<x.end&&g<1200;g++){if(s>todayS){stop=true;return}const e=nextMo(s)<x.end?nextMo(s):x.end;push(x,i,s,e,false);s=e}
+   for(let k=0;k<1200;k++){const s=addM(x.start,k);if(s>=x.end)break;if(s>todayS){stop=true;return}const n1=addM(x.start,k+1);push(x,i,s,n1<x.end?n1:x.end,false)}
   }else{
    const n=mons(x.start,x.end);
    for(let k=0;k<n;k++){const s=addM(x.start,k);if(s>todayS){stop=true;return}push(x,i,s,k===n-1?x.end:addM(x.start,k+1),false)}
@@ -310,7 +310,7 @@ function sched(l){
  });
  const r=cur(l),li=l.rounds.length-1;
  if(r&&r.start&&r.end&&l.status!=='ปิดบัญชี'&&todayS>=r.end){
-  if(D_){for(let s=r.end,g=0;s<=todayS&&g<1200;g++){const e=nextMo(s);push(r,li,s,e,true);s=e}}
+  if(D_){for(let k=0;k<1200;k++){const s=addM(r.end,k);if(s>todayS)break;push(r,li,s,addM(r.end,k+1),true)}}
   else for(let k=mons(r.start,r.end);;k++){const s=addM(r.start,k);if(s>todayS||k>600)break;push(r,li,s,addM(r.start,k+1),true)}
  }
  return rows;
@@ -356,7 +356,7 @@ function show(){
  const sec=(h,c)=>`<h3>${h}</h3>${c}`;
  $('dt').innerHTML=`<div class="pn"><div class="row"><div><span class="bd s-${l.status}">${l.status}</span> <span class="cal">สัญญาที่ ${esc(l.no)}</span><h2>${esc(l.borrower)}</h2></div>
  ${RW?`<div><button class="btn sm" onclick="edit('${l.id}')">แก้ไข</button> <button class="btn sm d" onclick="del('${l.id}')">${S.del===l.id?'กดอีกครั้งเพื่อลบ':'ลบ'}</button></div>`:''}</div>
- <div class="kv" style="margin-top:10px"><div><span>เงินต้นรวม</span><b>${M(tot(l))}</b></div><div><span>เงินต้นกลุ่มหลักเริ่มต้น</span><b>${M(b0)}</b></div><div><span>เงินต้นกลุ่มหลักปัจจุบัน (ฐานดอกเบี้ย)</span><b>${M(curP(l))}</b></div><div><span>วิธีคิดดอกเบี้ย</span><b>${isDay(l)?'คิดตามจำนวนวันของเดือน ÷ 365 (เดือนปฏิทิน)':'รายเดือน (÷12)'}</b></div>
+ <div class="kv" style="margin-top:10px"><div><span>เงินต้นรวม</span><b>${M(tot(l))}</b></div><div><span>เงินต้นกลุ่มหลักเริ่มต้น</span><b>${M(b0)}</b></div><div><span>เงินต้นกลุ่มหลักปัจจุบัน (ฐานดอกเบี้ย)</span><b>${M(curP(l))}</b></div><div><span>วิธีคิดดอกเบี้ย</span><b>${isDay(l)?'งวดตามสัญญา คิดยอดตามจำนวนวัน ÷ 365':'รายเดือน (÷12)'}</b></div>
  <div><span>ดอกเบี้ย/ปี (รอบล่าสุด)</span><b>${r?M(curP(l)*r.rate/100):'-'}</b></div><div><span>เงินปากถุง ${l.fee||0}%</span><b>${M(b0*(l.fee||0)/100)}</b></div>
  <div><span>วันสิ้นสุดล่าสุด</span><b>${r?dt(r.end):'-'}${d!==null?(d<0?' (เกิน '+(-d)+' วัน)':' (อีก '+d+' วัน)'):''}</b></div></div>
  ${sec('เงินต้นแยกตามผู้ให้กู้',`<table class="tbl"><tbody>${ent.map(([n,v])=>`<tr><td>${esc(n)} ${(D.lenders.find(x=>x.n===n)||{}).main?'<span class="cal">(กลุ่มหลัก)</span>':''}</td><td>${M(v)}</td></tr>`).join('')||'<tr><td>-</td><td></td></tr>'}</tbody><tfoot><tr><td>รวม</td><td>${M(tot(l))}</td></tr></tfoot></table>`)}
@@ -367,7 +367,7 @@ function show(){
  ${(()=>{const T=split(l),R=T.R;if(!R.length)return sec('ดอกเบี้ยรายเดือน','<div class="cal">ยังไม่มีงวดดอกเบี้ย (ยังไม่มีรอบสัญญา หรือยังไม่ถึงวันเริ่มต้น)</div>');
   const ov=R.filter(x=>x.over).length;
   return sec('ดอกเบี้ยรายเดือน ถึงปัจจุบัน ('+R.length+' งวด)',`<div class="kv" style="margin-bottom:8px"><div><span>ดอกเบี้ยสะสมถึงปัจจุบัน</span><b>${M(R[R.length-1].cum)}</b></div><div><span>ชำระแล้ว (${T.pn} งวด)</span><b style="color:var(--ok)">${M(T.p)}</b></div><div><span>ยังไม่ชำระ (${T.un} งวด)</span><b style="color:${T.u?'var(--er)':'var(--ok)'}">${M(T.u)}</b></div></div>
-  <div class="cal" style="margin-bottom:6px">${isDay(l)?'คิดรายเดือนตามเดือนปฏิทิน: เงินต้น × อัตรา/ปี × จำนวนวันของเดือนนั้น ÷ 365 (เดือนที่สัญญาเริ่มหรือสิ้นสุดกลางเดือน นับเฉพาะวันที่อยู่ในสัญญา)':'คิดรายเดือน: เงินต้น × อัตรา/ปี ÷ 12'} โดยใช้เงินต้นของแต่ละรอบ (เริ่มต้น ${M(b0)} ปัจจุบัน ${M(curP(l))}) นับทุกงวดที่เริ่มแล้วถึงวันนี้ (${dt(todayS)})${ov?` · มี ${ov} งวดที่เกินวันสิ้นสุดสัญญา คิดต่อด้วยอัตราของรอบล่าสุด`:''} · ติ๊กช่องหน้างวดเมื่อชำระดอกเบี้ยแล้ว</div>
+  <div class="cal" style="margin-bottom:6px">${isDay(l)?'ตัดงวดรายเดือนตามสัญญา (นับจากวันเริ่มสัญญา) แต่คิดยอดดอกเบี้ยตามจำนวนวันของงวด: เงินต้น × อัตรา/ปี × จำนวนวันของงวด ÷ 365':'คิดรายเดือน: เงินต้น × อัตรา/ปี ÷ 12'} โดยใช้เงินต้นของแต่ละรอบ (เริ่มต้น ${M(b0)} ปัจจุบัน ${M(curP(l))}) นับทุกงวดที่เริ่มแล้วถึงวันนี้ (${dt(todayS)})${ov?` · มี ${ov} งวดที่เกินวันสิ้นสุดสัญญา คิดต่อด้วยอัตราของรอบล่าสุด`:''} · ติ๊กช่องหน้างวดเมื่อชำระดอกเบี้ยแล้ว</div>
   ${RW?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px"><button class="btn sm" onclick="tickAll('${l.id}','all')">ติ๊กชำระแล้วทุกงวดที่ผ่านมา</button><button class="btn sm d" onclick="tickAll('${l.id}','clear')">ล้างการติ๊กทั้งหมด</button></div>`:''}
   <div style="overflow-x:auto"><table class="tbl"><thead><tr><th>ชำระแล้ว</th><th>งวด</th><th>ช่วงวันที่</th><th>วัน</th><th>เงินต้น</th><th>อัตรา</th><th>ดอกเบี้ย</th><th>สถานะ</th></tr></thead><tbody>${R.map(x=>{const pd=paidOf(l,x);return `<tr${x.cur?' style="background:var(--acb)"':pd?' style="color:var(--mu)"':''}><td><input type="checkbox" style="width:20px;height:20px;cursor:pointer" ${pd?'checked':''} ${RW?'':'disabled'} onchange="tick('${l.id}','${x.key}',this.checked)"></td><td>${x.n}${x.mo?' · '+x.mo:''}${x.cur?' <span class="cal">(งวดปัจจุบัน)</span>':''}${x.over?' <span class="cal" style="color:var(--wn)">(เกินกำหนด)</span>':''}</td><td>${dt(x.s)} – ${dt(x.e)}</td><td>${x.d}</td><td>${M(x.P)}</td><td>${x.rate}%</td><td>${M(x.a)}</td><td>${pd?'<span class="bd s-ปกติ">ชำระแล้ว</span>':'<span class="bd s-ค้างชำระ">ยังไม่ชำระ</span>'}</td></tr>`}).join('')}</tbody><tfoot><tr><td colspan="7">ชำระแล้ว</td><td>${M(T.p)}</td></tr><tr><td colspan="7">ยังไม่ชำระ</td><td>${M(T.u)}</td></tr><tr><td colspan="7">รวมดอกเบี้ยสะสมถึงปัจจุบัน</td><td>${M(R[R.length-1].cum)}</td></tr></tfoot></table></div>`)})()}
  ${sec('ผู้ค้ำประกัน',((l.guar||[]).length?'<div class="tx">'+l.guar.map(g=>'• '+esc(g)).join('\n')+'</div>':'<div class="cal">ไม่มี</div>')+att(l,'guarantee'))}
@@ -384,7 +384,7 @@ function edit(id){
 function fm(){
  const v=(k,x)=>`value="${esc(x)}"`;
  $('mo').innerHTML=`<div class="md"><div class="mb fm"><h2 style="margin:0">${E._new?'เพิ่มสัญญาใหม่':'แก้ไขสัญญา'}</h2>
- <div class="g2"><div><label>สัญญาที่</label><input id="e_no" ${v('',E.no)}></div><div><label>สถานะ</label><select id="e_st">${ST.map(s=>`<option ${s===E.status?'selected':''}>${s}</option>`).join('')}</select></div><div><label>เงินปากถุง (%)</label><input id="e_fee" type="number" step="0.1" ${v('',E.fee)}></div><div><label>วิธีคิดดอกเบี้ย</label><select id="e_calc"><option value="month" ${E.calc!=='day'?'selected':''}>รายเดือน (÷12)</option><option value="day" ${E.calc==='day'?'selected':''}>คิดตามจำนวนวันของเดือน ÷ 365 (เดือนปฏิทิน)</option></select></div></div>
+ <div class="g2"><div><label>สัญญาที่</label><input id="e_no" ${v('',E.no)}></div><div><label>สถานะ</label><select id="e_st">${ST.map(s=>`<option ${s===E.status?'selected':''}>${s}</option>`).join('')}</select></div><div><label>เงินปากถุง (%)</label><input id="e_fee" type="number" step="0.1" ${v('',E.fee)}></div><div><label>วิธีคิดดอกเบี้ย</label><select id="e_calc"><option value="month" ${E.calc!=='day'?'selected':''}>รายเดือน (÷12)</option><option value="day" ${E.calc==='day'?'selected':''}>งวดตามสัญญา คิดยอดตามจำนวนวัน ÷ 365</option></select></div></div>
  <label>ผู้กู้</label><textarea id="e_b" rows="2">${esc(E.borrower)}</textarea>
  <label>เงินต้นแยกตามผู้ให้กู้ (บาท)</label><div class="lg">${D.lenders.map((x,i)=>`<div><span class="cal">${esc(x.n)}${x.main?' ★':''}</span><input type="number" class="la" data-n="${esc(x.n)}" value="${E.amt[x.n]||''}"></div>`).join('')}</div>
  <div style="display:flex;gap:6px;margin-top:6px"><input id="nl" placeholder="เพิ่มชื่อผู้ให้กู้ใหม่"><button class="btn sm" onclick="addL()">เพิ่ม</button></div>
