@@ -64,7 +64,7 @@ main{max-width:1280px;margin:0 auto;padding:16px}
 <button class="btn" id="lkb" style="display:none" onclick="lock()">🔒 ล็อก</button><button class="btn" id="cpb" style="display:none" onclick="chpw()">เปลี่ยนรหัสผ่าน</button>
 <button class="btn" onclick="backup()">ส่งออก (ไม่เข้ารหัส)</button>
 <button class="btn" id="impb" onclick="document.getElementById('imp').click()">นำเข้า</button>
-<input id="imp" type="file" accept=".json" hidden onchange="imp(this)">
+<input id="imp" type="file" hidden onchange="imp(this)">
 </div>
 </header>
 <main>
@@ -88,13 +88,14 @@ const saveLenders=()=>DB?wr(DB.doc('meta/lenders').set({list:D.lenders})):(persi
 const enc=new TextEncoder(),dec=new TextDecoder();
 const b64=u=>{let s='';new Uint8Array(u).forEach(c=>s+=String.fromCharCode(c));return btoa(s)};
 const ub=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
-let KEY=null,SALT=null,Q=Promise.resolve(),idle=null,fails=0;
+let RESTMSG='',KEY=null,SALT=null,Q=Promise.resolve(),idle=null,fails=0;
 async function derive(pw,salt){const m=await crypto.subtle.importKey('raw',enc.encode(pw),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:250000,hash:'SHA-256'},m,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
 const VK='loanVault',BK='loanLastBackup';
 function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function lsSet(k,v){try{localStorage.setItem(k,v);return true}catch(e){return false}}
 const MOB=/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
-async function pack(){const iv=crypto.getRandomValues(new Uint8Array(12));const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},KEY,enc.encode(JSON.stringify(D)));return JSON.stringify({app:'loanVault',v:1,s:b64(SALT),i:b64(iv),d:b64(ct)})}
+async function pack(){const iv=crypto.getRandomValues(new Uint8Array(12));const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},KEY,enc.encode(JSON.stringify(D)));
+ return JSON.stringify({app:'loanVault',v:2,s:b64(SALT),i:b64(iv),d:b64(ct)})}
 async function seal(){const txt=await pack();localStorage.setItem(VK,txt);updUp()}
 function persist(){if(!KEY)return;Q=Q.then(seal).catch(()=>flash('บันทึกในเครื่องนี้ไม่ได้ กรุณาสำรองลงไฟล์ทันที'))}
 function updUp(){
@@ -102,21 +103,54 @@ function updUp(){
  const t=+lsGet(BK)||0,d=t?Math.floor((Date.now()-t)/864e5):null,has=D.loans.length>0;
  const st=!t?'ยังไม่เคยสำรองลงไฟล์':'สำรองไฟล์ล่าสุด '+(d<=0?'วันนี้':d+' วันก่อน');
  const warn=has&&(!t||d>=7);
- $('up').textContent='บันทึกอัตโนมัติในเครื่องนี้ (เข้ารหัส) · '+(warn?'⚠ ':'')+st+(warn&&t?' ควรสำรองใหม่':'');
+ const fs=D.loans.flatMap(l=>l.files||[]),fz=fs.reduce((a,f)=>a+(f.size||0),0);
+ $('up').textContent='บันทึกอัตโนมัติในเครื่องนี้ (เข้ารหัส) · '+(warn?'⚠ ':'')+st+(warn&&t?' ควรสำรองใหม่':'')+(fs.length?' · เอกสารแนบ '+fs.length+' ไฟล์ ('+fsz(fz)+')':'');
  $('up').style.color=warn?'var(--wn)':'';
 }
 function dl(txt,name){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));a.download=name;document.body.appendChild(a);a.click();a.remove()}
-async function sendFile(txt,name){
- if(MOB){try{const f=new File([txt],name,{type:'application/json'});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f],title:name});return true}}catch(e){if(e&&e.name==='AbortError')return false}}
- dl(txt,name);return true;
+async function sendBlob(blob,name){
+ if(MOB){try{const f=new File([blob],name,{type:blob.type});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f],title:name});return true}}catch(e){if(e&&e.name==='AbortError')return false}}
+ const url=URL.createObjectURL(blob);dlUrl(url,name);setTimeout(()=>URL.revokeObjectURL(url),120000);return true;
+}
+const sendFile=(txt,name)=>sendBlob(new Blob([txt],{type:'application/json'}),name);
+// ไฟล์สำรอง: ถ้าไม่มีเอกสารแนบ = JSON เล็ก; ถ้ามี = ไฟล์ไบนารี .lvb (หัว JSON + เนื้อไฟล์ที่เข้ารหัสต่อกัน) ไม่แปลงเป็นข้อความก้อนใหญ่
+async function buildBackup(){
+ const v=JSON.parse(await pack());
+ const keys=(await idbTx('readonly',s=>s.getAllKeys()).catch(()=>[]))||[];
+ if(!keys.length)return{blob:new Blob([JSON.stringify(v)],{type:'application/json'}),name:'loan-data-'+todayS+'.json',n:0};
+ const parts=[],meta=[];
+ for(const k of keys){const r=await idbGet(k);if(!r)continue;parts.push(new Blob([r.ct]));meta.push({id:r.id,i:b64(r.iv),len:r.ct.byteLength})}
+ const hd=enc.encode(JSON.stringify({app:'loanVault',v:3,s:v.s,i:v.i,d:v.d,files:meta})),ln=new Uint8Array(4);new DataView(ln.buffer).setUint32(0,hd.length);
+ return{blob:new Blob([enc.encode('LVB3'),ln,hd,...parts],{type:'application/octet-stream'}),name:'loan-data-'+todayS+'.lvb',n:meta.length};
 }
 async function backupEnc(){
  if(!KEY)return;
- if(await sendFile(await pack(),'loan-data-'+todayS+'.json')){lsSet(BK,String(Date.now()));updUp();flash('สำรองไฟล์แล้ว (เข้ารหัส) เก็บไว้ใน iCloud Drive หรือ Google Drive ได้')}
+ flash('กำลังสร้างไฟล์สำรอง… รอสักครู่');
+ try{
+  const b=await buildBackup();
+  if(await sendBlob(b.blob,b.name)){lsSet(BK,String(Date.now()));updUp();flash('สำรองไฟล์แล้ว: '+b.name+' ('+fsz(b.blob.size)+(b.n?' รวมเอกสารแนบ '+b.n+' ไฟล์':'')+') เก็บไว้ใน iCloud Drive หรือ Google Drive ได้')}
+ }catch(e){flash('สร้างไฟล์สำรองไม่สำเร็จ ('+((e&&e.name)||'error')+') ลองแนบไฟล์ให้น้อยลงหรือใช้เครื่องที่หน่วยความจำมากกว่า')}
 }
-function pickFile(){return new Promise((res,rej)=>{const i=document.createElement('input');i.type='file';i.accept='.json,application/json';
- i.onchange=()=>{const f=i.files[0];if(!f)return rej(new Error('cancel'));const r=new FileReader();r.onload=()=>res({name:f.name,text:String(r.result)});r.onerror=()=>rej(new Error('read'));r.readAsText(f)};
+function pickFile(){return new Promise((res,rej)=>{const i=document.createElement('input');i.type='file';
+ i.onchange=()=>{const f=i.files[0];f?res(f):rej(new Error('cancel'))};
  i.oncancel=()=>rej(new Error('cancel'));i.click()})}
+// อ่านไฟล์สำรองทั้งรูปแบบใหม่ (.lvb) และ JSON เดิม และพยายามกู้ไฟล์ที่เสียหาย/ถูกตัดท้าย
+async function readBackup(f){
+ const magic=String.fromCharCode(...new Uint8Array(await f.slice(0,4).arrayBuffer()));
+ if(magic==='LVB3'){
+  const len=new DataView(await f.slice(4,8).arrayBuffer()).getUint32(0);
+  const hd=JSON.parse(dec.decode(await f.slice(8,8+len).arrayBuffer()));let off=8+len;
+  const files=(hd.files||[]).map(x=>{const o={id:x.id,iv:x.i,off,len:x.len,ok:off+x.len<=f.size};off+=x.len;return o});
+  return{v:hd,files,f};
+ }
+ const text=(await f.text()).replace(/^﻿/,'');let v=null;
+ try{v=JSON.parse(text)}catch(e){}
+ if(v)return{v,files:(v.f||[]).map(x=>({id:x.id,iv:x.i,b64:x.d,ok:true})),f};
+ const m=k=>{const r=text.match(new RegExp('"'+k+'":"([^"]+)"'));return r&&r[1]};
+ const s_=m('s'),i_=m('i'),d_=m('d');if(!(s_&&i_&&d_))return null;
+ return{v:{s:s_,i:i_,d:d_},files:[...text.matchAll(/\{"id":"(f[a-z0-9]+)","i":"([^"]+)","d":"([^"]+)"\}/g)].map(x=>({id:x[1],iv:x[2],b64:x[3],ok:true})),salvaged:true,f};
+}
+const fileCt=async(bk,x)=>x.b64?ub(x.b64).buffer:await bk.f.slice(x.off,x.off+x.len).arrayBuffer();
 function arm(){clearTimeout(idle);if(DB||!KEY)return;idle=setTimeout(lock,300000)}
 ['click','keydown','touchstart','mousemove'].forEach(e=>addEventListener(e,()=>{if(KEY)arm()},{passive:true}));
 async function openVault(v,pw){const sl=ub(v.s),k=await derive(pw,sl);const d=JSON.parse(dec.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:ub(v.i)},k,ub(v.d))));return{k,sl,d}}
@@ -136,7 +170,7 @@ function wipe(){
  if(!confirm('ลบข้อมูลที่เก็บในเครื่องนี้ทั้งหมด? ทำย้อนกลับไม่ได้ (ถ้ามีไฟล์สำรองจะกู้คืนได้)'))return;
  if(!confirm('ยืนยันอีกครั้ง: ลบข้อมูลในเครื่องนี้ทั้งหมด'))return;
  try{localStorage.removeItem(VK);localStorage.removeItem(BK)}catch(e){}
- lockUI('ล้างข้อมูลในเครื่องนี้แล้ว');
+ idbClear().catch(()=>{});lockUI('ล้างข้อมูลในเครื่องนี้แล้ว');
 }
 async function go(mode){
  const pw=$('pw').value,pe=$('pe');pe.textContent='';
@@ -148,26 +182,31 @@ async function go(mode){
   if(mode==='new'){
    if(lsGet(VK)){pe.textContent='มีข้อมูลในเครื่องนี้อยู่แล้ว';return}
    SALT=crypto.getRandomValues(new Uint8Array(16));KEY=await derive(pw,SALT);D={lenders:[],loans:[]};
-   await seal();
+   await idbClear().catch(()=>{});await seal();
   }else if(mode==='open'){
    let v,r;
    try{v=JSON.parse(lsGet(VK))}catch(e){pe.textContent='ข้อมูลในเครื่องเสียหาย ให้ใช้ "เปิดจากไฟล์สำรอง"';return}
    try{r=await openVault(v,pw)}catch(e){await wait();pe.textContent='รหัสผ่านไม่ถูกต้อง';return}
    KEY=r.k;SALT=r.sl;D=r.d;
   }else{
-   let f,v,r;
+   let f,bk,r;
    try{f=await fp}catch(e){return}
-   try{v=JSON.parse(f.text.replace(/^﻿/,''))}catch(e){pe.textContent='ไฟล์นี้ไม่ใช่ไฟล์สำรองที่ถูกต้อง';return}
-   if(!(v&&v.s&&v.i&&v.d)){pe.textContent='ไฟล์นี้เป็นไฟล์ส่งออกแบบไม่เข้ารหัส ให้เริ่มใช้งานก่อน แล้วใช้ปุ่ม "นำเข้า" ในหน้าหลัก';return}
-   try{r=await openVault(v,pw)}catch(e){await wait();pe.textContent='รหัสผ่านไม่ถูกต้อง (ต้องใช้รหัสผ่านของไฟล์สำรองนี้)';return}
+   try{bk=await readBackup(f)}catch(e){pe.textContent='อ่านไฟล์ไม่สำเร็จ ไฟล์อาจเสียหายหรือใหญ่เกินกว่าที่เบราว์เซอร์จะอ่านได้';return}
+   if(!bk){pe.textContent='ไฟล์นี้ไม่ใช่ไฟล์สำรองที่ถูกต้อง หรือเสียหายมากเกินกว่าจะกู้ได้';return}
+   if(!(bk.v&&bk.v.s&&bk.v.i&&bk.v.d)){pe.textContent='ไฟล์นี้เป็นไฟล์ส่งออกแบบไม่เข้ารหัส ให้เริ่มใช้งานก่อน แล้วใช้ปุ่ม "นำเข้า" ในหน้าหลัก';return}
+   try{r=await openVault(bk.v,pw)}catch(e){await wait();pe.textContent='รหัสผ่านไม่ถูกต้อง (ต้องใช้รหัสผ่านของไฟล์สำรองนี้) หรือไฟล์เสียหาย';return}
+   const need=(r.d.loans||[]).flatMap(l=>l.files||[]),have=new Set(bk.files.filter(x=>x.ok).map(x=>x.id)),miss=need.filter(m=>!have.has(m.id));
    if(lsGet(VK)&&!confirm('ข้อมูลที่เก็บในเครื่องนี้จะถูกแทนที่ด้วยข้อมูลจากไฟล์สำรอง ดำเนินการต่อหรือไม่?'))return;
+   if((bk.salvaged||miss.length)&&!confirm('ไฟล์สำรองนี้ไม่สมบูรณ์ (อาจสร้างไม่เสร็จ) จะกู้ข้อมูลสัญญาได้ แต่เอกสารแนบกู้ได้ '+(need.length-miss.length)+' จาก '+need.length+' ไฟล์ ไฟล์ที่ขาดต้องแนบใหม่ ดำเนินการต่อหรือไม่?'))return;
+   try{await idbClear();for(const x of bk.files){if(!x.ok)continue;await idbPut({id:x.id,iv:ub(x.iv),ct:await fileCt(bk,x)})}}catch(e){pe.textContent='กู้คืนเอกสารแนบไม่สำเร็จ (พื้นที่เก็บข้อมูลของเบราว์เซอร์ไม่พอ หรือใช้โหมดส่วนตัว)';return}
    KEY=r.k;SALT=r.sl;D=r.d;await seal();lsSet(BK,String(Date.now()));
+   RESTMSG=miss.length?'กู้คืนข้อมูลแล้ว แต่เอกสารแนบขาด '+miss.length+' ไฟล์ (ดูเครื่องหมาย ⚠ ในหน้าสัญญา แล้วแนบใหม่)':'กู้คืนข้อมูลและเอกสารแนบแล้ว';
   }
  }catch(e){KEY=null;SALT=null;ready=false;D={lenders:[],loans:[]};pe.textContent='เก็บข้อมูลในเครื่องนี้ไม่ได้ ('+((e&&e.name)||'error')+') ลองปิดโหมดส่วนตัวของเบราว์เซอร์';return}
- fails=0;$('lk').style.display='none';$('lk').innerHTML='';ready=true;
+ fails=0;$('lk').style.display='none';$('lk').innerHTML='';ready=true;if(RESTMSG){flash(RESTMSG);RESTMSG=''}
  $('lkb').style.display=$('cpb').style.display=$('svb').style.display='';
  try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
- updUp();all();arm();
+ updUp();all();arm();refreshKeys();
 }
 function lock(){
  if(DB||!ready)return;
@@ -175,7 +214,7 @@ function lock(){
  ready=false;clearTimeout(idle);$('lkb').style.display=$('cpb').style.display=$('svb').style.display='none';$('up').textContent='';all();lockUI();
 }
 function chpw(){$('mo').innerHTML=`<div class="md"><div class="mb fm" style="max-width:360px"><h2 style="margin:0">เปลี่ยนรหัสผ่าน</h2><label>รหัสผ่านใหม่ (อย่างน้อย 8 ตัวอักษร)</label><input id="np" type="password" autocomplete="new-password"><label>ยืนยันรหัสผ่านใหม่</label><input id="np2" type="password" autocomplete="new-password"><div id="ne" class="cal" style="color:var(--er);min-height:18px"></div><div class="ft"><button class="btn" onclick="$('mo').innerHTML=''">ยกเลิก</button><button class="btn p" onclick="setpw()">บันทึก</button></div></div></div>`}
-async function setpw(){const a=$('np').value;if(a.length<8){$('ne').textContent='ต้องยาวอย่างน้อย 8 ตัวอักษร';return}if(a!==$('np2').value){$('ne').textContent='รหัสผ่านไม่ตรงกัน';return}SALT=crypto.getRandomValues(new Uint8Array(16));KEY=await derive(a,SALT);await seal();$('mo').innerHTML='';flash('เปลี่ยนรหัสผ่านแล้ว')}
+async function setpw(){const a=$('np').value;if(a.length<8){$('ne').textContent='ต้องยาวอย่างน้อย 8 ตัวอักษร';return}if(a!==$('np2').value){$('ne').textContent='รหัสผ่านไม่ตรงกัน';return}const ns=crypto.getRandomValues(new Uint8Array(16)),nk=await derive(a,ns);try{const ks=await idbTx('readonly',s=>s.getAllKeys()),out=[];for(const k of ks){const r=await idbGet(k);if(!r)continue;const pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:r.iv},KEY,r.ct),iv=crypto.getRandomValues(new Uint8Array(12));out.push({id:r.id,iv,ct:await crypto.subtle.encrypt({name:'AES-GCM',iv},nk,pt)})}SALT=ns;KEY=nk;await seal();for(const r of out)await idbPut(r)}catch(e){$('ne').textContent='เปลี่ยนรหัสผ่านไม่สำเร็จ ข้อมูลยังเป็นรหัสเดิม';return}$('mo').innerHTML='';flash('เปลี่ยนรหัสผ่านแล้ว (เอกสารแนบถูกเข้ารหัสใหม่ด้วย)')}
 function boot(){lockUI()}
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -189,21 +228,81 @@ const base=l=>{const mn=D.lenders.filter(x=>x.main).map(x=>x.n);const v=mn.reduc
 const prin=(l,i)=>{let v=base(l);for(let j=1;j<=i&&j<l.rounds.length;j++)v+=(+l.rounds[j].adj||0);return Math.max(0,v)};
 const curP=l=>l.rounds.length?prin(l,l.rounds.length-1):base(l);
 const isDay=l=>l.calc==='day';
-const YD=365;
-const intr=(l,r,i)=>{const P=prin(l,i==null?l.rounds.indexOf(r):i);return isDay(l)?P*(r.rate/100)*days(r.start,r.end)/YD:P*(r.rate/100)*mons(r.start,r.end)/12};
+// คิดตามจำนวนวัน: เงินต้น x อัตรา/ปี x จำนวนวัน / 365
+const dayInt=(P,rate,s,e)=>P*rate/100*days(s,e)/365;
+const MTH=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+const moLabel=s=>MTH[+s.slice(5,7)-1]+' '+(+s.slice(0,4)+543);
+const nextMo=s=>new Date(Date.UTC(+s.slice(0,4),+s.slice(5,7),1)).toISOString().slice(0,10);
+const intr=(l,r,i)=>{const P=prin(l,i==null?l.rounds.indexOf(r):i);return isDay(l)?dayInt(P,r.rate,r.start,r.end):P*(r.rate/100)*mons(r.start,r.end)/12};
 const cur=l=>l.rounds.length?l.rounds[l.rounds.length-1]:null;
 const todayS=new Date().toISOString().slice(0,10);
 const left=l=>{const r=cur(l);return r?days(todayS,r.end):null};
+// ===== ไฟล์แนบ (เก็บใน IndexedDB แบบเข้ารหัส AES-GCM ด้วยกุญแจเดียวกับข้อมูลสัญญา) =====
+const FMAX=15*1024*1024,FK={contract:'เอกสารสัญญา',mortgage:'สัญญาจำนอง',guarantee:'สัญญาค้ำประกัน'};
+const fsz=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round(n/1024))+' KB';
+function idb(){return new Promise((res,rej)=>{const r=indexedDB.open('loanFiles',1);r.onupgradeneeded=()=>r.result.createObjectStore('f',{keyPath:'id'});r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+async function idbTx(mode,fn){const db=await idb();return new Promise((res,rej)=>{const t=db.transaction('f',mode);let out;const rq=fn(t.objectStore('f'));if(rq)rq.onsuccess=()=>out=rq.result;t.oncomplete=()=>{db.close();res(out)};t.onerror=t.onabort=()=>{db.close();rej(t.error)}})}
+const idbPut=r=>idbTx('readwrite',s=>s.put(r)),idbGet=id=>idbTx('readonly',s=>s.get(id)),idbAll=()=>idbTx('readonly',s=>s.getAll()),idbClear=()=>idbTx('readwrite',s=>s.clear()),idbDel=id=>idbTx('readwrite',s=>s.delete(id)).catch(()=>{});
+async function fileBytes(id){const r=await idbGet(id);if(!r)return null;return crypto.subtle.decrypt({name:'AES-GCM',iv:r.iv},KEY,r.ct)}
+const att=(l,kind)=>{const F=(l.files||[]).filter(f=>f.kind===kind);
+ return `<div style="margin-top:8px"><div class="cal" style="margin-bottom:4px">📎 ไฟล์แนบ${FK[kind]} (${F.length})</div>${F.map(f=>`<div class="rd" style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;padding:6px 10px;margin-bottom:4px"><span style="word-break:break-all">${esc(f.name)} <span class="cal">${fsz(f.size)} · ${dt(f.added)}</span>${FKEYS&&!FKEYS.has(f.id)?' <span class="cal" style="color:var(--er)">⚠ ไม่พบไฟล์ในเครื่องนี้ ให้ลบแล้วแนบใหม่</span>':''}</span><span style="display:flex;gap:4px"><button class="btn sm" onclick="openFile('${f.id}')">เปิดดู</button><button class="btn sm" onclick="saveFile('${f.id}')">ดาวน์โหลด</button>${RW?`<button class="btn sm d" onclick="delFile('${l.id}','${f.id}')">ลบ</button>`:''}</span></div>`).join('')}${RW?`<input type="file" id="fi_${kind}" multiple hidden accept="application/pdf,image/*,.doc,.docx" onchange="addFiles('${l.id}','${kind}',this)"><button class="btn sm" onclick="document.getElementById('fi_${kind}').click()">+ แนบไฟล์</button> <span class="cal">PDF / รูปภาพ / Word ไม่เกิน ${fsz(FMAX)} ต่อไฟล์</span>`:''}</div>`};
+let FKEYS=null;
+async function refreshKeys(){try{FKEYS=new Set(await idbTx('readonly',s=>s.getAllKeys()))}catch(e){FKEYS=null}if(ready)keep()}
+const keep=()=>{const y=window.scrollY;all();window.scrollTo(0,y)};
+async function addFiles(id,kind,inp){
+ const l=D.loans.find(x=>x.id===id),fl=[...inp.files];inp.value='';if(!l||!KEY)return;
+ let ok=0;
+ let n=0;
+ for(const f of fl){
+  n++;if(fl.length>1)flash('กำลังแนบไฟล์ '+n+'/'+fl.length+' …');await new Promise(r=>setTimeout(r,20));
+  try{const e=navigator.storage&&navigator.storage.estimate?await navigator.storage.estimate():null;if(e&&e.quota&&e.usage+f.size*1.5>e.quota){flash('พื้นที่เก็บข้อมูลของเบราว์เซอร์ใกล้เต็ม แนบเพิ่มไม่ได้ กรุณาสำรองไฟล์แล้วลบเอกสารที่ไม่จำเป็น');break}}catch(e){}
+  if(f.size>FMAX){flash('ไฟล์ "'+f.name+'" ใหญ่เกิน '+fsz(FMAX)+' ข้ามไฟล์นี้');continue}
+  try{
+   const buf=await f.arrayBuffer(),iv=crypto.getRandomValues(new Uint8Array(12)),ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},KEY,buf);
+   const fid='f'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+   await idbPut({id:fid,iv,ct});FKEYS&&FKEYS.add(fid);
+   (l.files=l.files||[]).push({id:fid,kind,name:f.name,type:f.type||'',size:f.size,added:todayS});ok++;
+  }catch(e){flash('แนบไฟล์ไม่สำเร็จ: '+((e&&e.name)||'error')+' (ถ้าใช้โหมดส่วนตัวของเบราว์เซอร์ ให้ปิดโหมดนั้น)');break}
+ }
+ if(ok){saveLoan(l);flash('แนบไฟล์แล้ว '+ok+' ไฟล์ · อย่าลืมกด 💾 สำรองลงไฟล์ เพื่อเก็บเอกสารไว้ในไฟล์สำรอง')}
+ keep();
+}
+async function openFile(id){
+ const m=D.loans.flatMap(l=>l.files||[]).find(f=>f.id===id);if(!m)return;
+ const w=window.open('','_blank');
+ try{
+  const buf=await fileBytes(id);
+  if(!buf){if(w)w.close();flash('ไม่พบไฟล์ในเครื่องนี้ ให้กู้คืนจากไฟล์สำรอง');return}
+  const url=URL.createObjectURL(new Blob([buf],{type:m.type||'application/octet-stream'}));
+  if(w)w.location.href=url;else dlUrl(url,m.name);
+  setTimeout(()=>URL.revokeObjectURL(url),120000);
+ }catch(e){if(w)w.close();flash('เปิดไฟล์ไม่ได้')}
+}
+function dlUrl(url,name){const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove()}
+async function saveFile(id){
+ const m=D.loans.flatMap(l=>l.files||[]).find(f=>f.id===id);if(!m)return;
+ try{
+  const buf=await fileBytes(id);if(!buf){flash('ไม่พบไฟล์ในเครื่องนี้ ให้กู้คืนจากไฟล์สำรอง');return}
+  const blob=new Blob([buf],{type:m.type||'application/octet-stream'});
+  if(MOB){try{const f=new File([blob],m.name,{type:blob.type});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f]});return}}catch(e){if(e&&e.name==='AbortError')return}}
+  const url=URL.createObjectURL(blob);dlUrl(url,m.name);setTimeout(()=>URL.revokeObjectURL(url),60000);
+ }catch(e){flash('ดาวน์โหลดไม่ได้')}
+}
+async function delFile(lid,fid){
+ const l=D.loans.find(x=>x.id===lid);if(!l)return;const m=(l.files||[]).find(f=>f.id===fid);if(!m)return;
+ if(!confirm('ลบไฟล์แนบ "'+m.name+'" ?'))return;
+ l.files=l.files.filter(f=>f.id!==fid);await idbDel(fid);FKEYS&&FKEYS.delete(fid);saveLoan(l);keep();
+}
 const addM=(s,k)=>{const[y,m,d]=s.split('-').map(Number);const t=new Date(Date.UTC(y,m-1+k,1));const last=new Date(Date.UTC(t.getUTCFullYear(),t.getUTCMonth()+1,0)).getUTCDate();t.setUTCDate(Math.min(d,last));return t.toISOString().slice(0,10)};
 // ตารางดอกเบี้ยรายเดือน: ดอกเบี้ย/เดือน = เงินต้นกลุ่มหลัก x อัตรา/ปี / 12 นับทุกงวดที่เริ่มแล้วถึงวันนี้
 function sched(l){
  const rows=[],D_=isDay(l);let cum=0;
- const push=(r,i,s,e,over)=>{const P=prin(l,i),d=days(s,e),a=D_?P*r.rate/100*d/YD:P*r.rate/100/12;cum+=a;rows.push({key:s,n:rows.length+1,s,e,d,P,rate:r.rate,a,cum,cur:s<=todayS&&todayS<e,over,round:r.label})};
+ const push=(r,i,s,e,over)=>{const P=prin(l,i),d=days(s,e),a=D_?dayInt(P,r.rate,s,e):P*r.rate/100/12;cum+=a;rows.push({key:s,mo:D_?moLabel(s):'',n:rows.length+1,s,e,d,P,rate:r.rate,a,cum,cur:s<=todayS&&todayS<e,over,round:r.label})};
  let stop=false;
  l.rounds.forEach((x,i)=>{
   if(stop||!x.start||!x.end)return;
   if(D_){
-   for(let k=0;k<600;k++){const s=addM(x.start,k);if(s>=x.end)break;if(s>todayS){stop=true;return}push(x,i,s,addM(x.start,k+1)<x.end?addM(x.start,k+1):x.end,false)}
+   for(let s=x.start,g=0;s<x.end&&g<1200;g++){if(s>todayS){stop=true;return}const e=nextMo(s)<x.end?nextMo(s):x.end;push(x,i,s,e,false);s=e}
   }else{
    const n=mons(x.start,x.end);
    for(let k=0;k<n;k++){const s=addM(x.start,k);if(s>todayS){stop=true;return}push(x,i,s,k===n-1?x.end:addM(x.start,k+1),false)}
@@ -211,7 +310,7 @@ function sched(l){
  });
  const r=cur(l),li=l.rounds.length-1;
  if(r&&r.start&&r.end&&l.status!=='ปิดบัญชี'&&todayS>=r.end){
-  if(D_){for(let k=0;k<600;k++){const s=addM(r.end,k);if(s>todayS)break;push(r,li,s,addM(r.end,k+1),true)}}
+  if(D_){for(let s=r.end,g=0;s<=todayS&&g<1200;g++){const e=nextMo(s);push(r,li,s,e,true);s=e}}
   else for(let k=mons(r.start,r.end);;k++){const s=addM(r.start,k);if(s>todayS||k>600)break;push(r,li,s,addM(r.start,k+1),true)}
  }
  return rows;
@@ -257,24 +356,25 @@ function show(){
  const sec=(h,c)=>`<h3>${h}</h3>${c}`;
  $('dt').innerHTML=`<div class="pn"><div class="row"><div><span class="bd s-${l.status}">${l.status}</span> <span class="cal">สัญญาที่ ${esc(l.no)}</span><h2>${esc(l.borrower)}</h2></div>
  ${RW?`<div><button class="btn sm" onclick="edit('${l.id}')">แก้ไข</button> <button class="btn sm d" onclick="del('${l.id}')">${S.del===l.id?'กดอีกครั้งเพื่อลบ':'ลบ'}</button></div>`:''}</div>
- <div class="kv" style="margin-top:10px"><div><span>เงินต้นรวม</span><b>${M(tot(l))}</b></div><div><span>เงินต้นกลุ่มหลักเริ่มต้น</span><b>${M(b0)}</b></div><div><span>เงินต้นกลุ่มหลักปัจจุบัน (ฐานดอกเบี้ย)</span><b>${M(curP(l))}</b></div><div><span>วิธีคิดดอกเบี้ย</span><b>${isDay(l)?'ตามจำนวนวันจริง (÷365)':'รายเดือน (÷12)'}</b></div>
+ <div class="kv" style="margin-top:10px"><div><span>เงินต้นรวม</span><b>${M(tot(l))}</b></div><div><span>เงินต้นกลุ่มหลักเริ่มต้น</span><b>${M(b0)}</b></div><div><span>เงินต้นกลุ่มหลักปัจจุบัน (ฐานดอกเบี้ย)</span><b>${M(curP(l))}</b></div><div><span>วิธีคิดดอกเบี้ย</span><b>${isDay(l)?'คิดตามจำนวนวันของเดือน ÷ 365 (เดือนปฏิทิน)':'รายเดือน (÷12)'}</b></div>
  <div><span>ดอกเบี้ย/ปี (รอบล่าสุด)</span><b>${r?M(curP(l)*r.rate/100):'-'}</b></div><div><span>เงินปากถุง ${l.fee||0}%</span><b>${M(b0*(l.fee||0)/100)}</b></div>
  <div><span>วันสิ้นสุดล่าสุด</span><b>${r?dt(r.end):'-'}${d!==null?(d<0?' (เกิน '+(-d)+' วัน)':' (อีก '+d+' วัน)'):''}</b></div></div>
  ${sec('เงินต้นแยกตามผู้ให้กู้',`<table class="tbl"><tbody>${ent.map(([n,v])=>`<tr><td>${esc(n)} ${(D.lenders.find(x=>x.n===n)||{}).main?'<span class="cal">(กลุ่มหลัก)</span>':''}</td><td>${M(v)}</td></tr>`).join('')||'<tr><td>-</td><td></td></tr>'}</tbody><tfoot><tr><td>รวม</td><td>${M(tot(l))}</td></tr></tfoot></table>`)}
  ${sec('รอบสัญญา / การขยาย ('+l.rounds.length+')',l.rounds.map((x,i)=>`<div class="rd ${i===l.rounds.length-1?'cur':''}"><div class="h"><span>${esc(x.label)}${i===l.rounds.length-1?' · ล่าสุด':''}</span><span>${dt(x.start)} → ${dt(x.end)}</span></div>
  <p><span>ระยะเวลา:</span> ${days(x.start,x.end)} วัน / ${mons(x.start,x.end)} เดือน · <span>ดอกเบี้ย:</span> ${x.rate}%/ปี = <b>${M(intr(l,x,i))}</b> <span>(เงินต้นรอบนี้ ${M(prin(l,i))}${i>0&&+x.adj?' · '+(+x.adj>0?'เพิ่ม ':'ลด ')+M(Math.abs(+x.adj)):''})</span></p>
  <p><span>วันจ่ายดอกเบี้ย:</span> ${esc(x.payDay)||'-'}</p><p><span>วิธีจ่ายดอกเบี้ย:</span> ${esc(x.method)||'-'}</p><p><span>เช็คเงินต้น:</span> ${esc(x.chk)||'-'}</p></div>`).join('')||'<div class="cal">ยังไม่มีรอบสัญญา</div>')}
+ ${sec('เอกสารสัญญา',att(l,'contract'))}
  ${(()=>{const T=split(l),R=T.R;if(!R.length)return sec('ดอกเบี้ยรายเดือน','<div class="cal">ยังไม่มีงวดดอกเบี้ย (ยังไม่มีรอบสัญญา หรือยังไม่ถึงวันเริ่มต้น)</div>');
   const ov=R.filter(x=>x.over).length;
   return sec('ดอกเบี้ยรายเดือน ถึงปัจจุบัน ('+R.length+' งวด)',`<div class="kv" style="margin-bottom:8px"><div><span>ดอกเบี้ยสะสมถึงปัจจุบัน</span><b>${M(R[R.length-1].cum)}</b></div><div><span>ชำระแล้ว (${T.pn} งวด)</span><b style="color:var(--ok)">${M(T.p)}</b></div><div><span>ยังไม่ชำระ (${T.un} งวด)</span><b style="color:${T.u?'var(--er)':'var(--ok)'}">${M(T.u)}</b></div></div>
-  <div class="cal" style="margin-bottom:6px">${isDay(l)?'คิดตามจำนวนวันจริงของแต่ละงวด: เงินต้น × อัตรา/ปี × จำนวนวัน ÷ 365':'คิดรายเดือน: เงินต้น × อัตรา/ปี ÷ 12'} โดยใช้เงินต้นของแต่ละรอบ (เริ่มต้น ${M(b0)} ปัจจุบัน ${M(curP(l))}) นับทุกงวดที่เริ่มแล้วถึงวันนี้ (${dt(todayS)})${ov?` · มี ${ov} งวดที่เกินวันสิ้นสุดสัญญา คิดต่อด้วยอัตราของรอบล่าสุด`:''} · ติ๊กช่องหน้างวดเมื่อชำระดอกเบี้ยแล้ว</div>
+  <div class="cal" style="margin-bottom:6px">${isDay(l)?'คิดรายเดือนตามเดือนปฏิทิน: เงินต้น × อัตรา/ปี × จำนวนวันของเดือนนั้น ÷ 365 (เดือนที่สัญญาเริ่มหรือสิ้นสุดกลางเดือน นับเฉพาะวันที่อยู่ในสัญญา)':'คิดรายเดือน: เงินต้น × อัตรา/ปี ÷ 12'} โดยใช้เงินต้นของแต่ละรอบ (เริ่มต้น ${M(b0)} ปัจจุบัน ${M(curP(l))}) นับทุกงวดที่เริ่มแล้วถึงวันนี้ (${dt(todayS)})${ov?` · มี ${ov} งวดที่เกินวันสิ้นสุดสัญญา คิดต่อด้วยอัตราของรอบล่าสุด`:''} · ติ๊กช่องหน้างวดเมื่อชำระดอกเบี้ยแล้ว</div>
   ${RW?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px"><button class="btn sm" onclick="tickAll('${l.id}','all')">ติ๊กชำระแล้วทุกงวดที่ผ่านมา</button><button class="btn sm d" onclick="tickAll('${l.id}','clear')">ล้างการติ๊กทั้งหมด</button></div>`:''}
-  <div style="overflow-x:auto"><table class="tbl"><thead><tr><th>ชำระแล้ว</th><th>งวด</th><th>ช่วงวันที่</th><th>วัน</th><th>เงินต้น</th><th>อัตรา</th><th>ดอกเบี้ย</th><th>สถานะ</th></tr></thead><tbody>${R.map(x=>{const pd=paidOf(l,x);return `<tr${x.cur?' style="background:var(--acb)"':pd?' style="color:var(--mu)"':''}><td><input type="checkbox" style="width:20px;height:20px;cursor:pointer" ${pd?'checked':''} ${RW?'':'disabled'} onchange="tick('${l.id}','${x.key}',this.checked)"></td><td>${x.n}${x.cur?' <span class="cal">(งวดปัจจุบัน)</span>':''}${x.over?' <span class="cal" style="color:var(--wn)">(เกินกำหนด)</span>':''}</td><td>${dt(x.s)} – ${dt(x.e)}</td><td>${x.d}</td><td>${M(x.P)}</td><td>${x.rate}%</td><td>${M(x.a)}</td><td>${pd?'<span class="bd s-ปกติ">ชำระแล้ว</span>':'<span class="bd s-ค้างชำระ">ยังไม่ชำระ</span>'}</td></tr>`}).join('')}</tbody><tfoot><tr><td colspan="7">ชำระแล้ว</td><td>${M(T.p)}</td></tr><tr><td colspan="7">ยังไม่ชำระ</td><td>${M(T.u)}</td></tr><tr><td colspan="7">รวมดอกเบี้ยสะสมถึงปัจจุบัน</td><td>${M(R[R.length-1].cum)}</td></tr></tfoot></table></div>`)})()}
- ${sec('ผู้ค้ำประกัน',(l.guar||[]).length?'<div class="tx">'+l.guar.map(g=>'• '+esc(g)).join('\n')+'</div>':'<div class="cal">ไม่มี</div>')}
- ${sec('รายละเอียดสัญญาจำนอง',`<div class="tx">${esc(l.mort)||'-'}</div>`)}
+  <div style="overflow-x:auto"><table class="tbl"><thead><tr><th>ชำระแล้ว</th><th>งวด</th><th>ช่วงวันที่</th><th>วัน</th><th>เงินต้น</th><th>อัตรา</th><th>ดอกเบี้ย</th><th>สถานะ</th></tr></thead><tbody>${R.map(x=>{const pd=paidOf(l,x);return `<tr${x.cur?' style="background:var(--acb)"':pd?' style="color:var(--mu)"':''}><td><input type="checkbox" style="width:20px;height:20px;cursor:pointer" ${pd?'checked':''} ${RW?'':'disabled'} onchange="tick('${l.id}','${x.key}',this.checked)"></td><td>${x.n}${x.mo?' · '+x.mo:''}${x.cur?' <span class="cal">(งวดปัจจุบัน)</span>':''}${x.over?' <span class="cal" style="color:var(--wn)">(เกินกำหนด)</span>':''}</td><td>${dt(x.s)} – ${dt(x.e)}</td><td>${x.d}</td><td>${M(x.P)}</td><td>${x.rate}%</td><td>${M(x.a)}</td><td>${pd?'<span class="bd s-ปกติ">ชำระแล้ว</span>':'<span class="bd s-ค้างชำระ">ยังไม่ชำระ</span>'}</td></tr>`}).join('')}</tbody><tfoot><tr><td colspan="7">ชำระแล้ว</td><td>${M(T.p)}</td></tr><tr><td colspan="7">ยังไม่ชำระ</td><td>${M(T.u)}</td></tr><tr><td colspan="7">รวมดอกเบี้ยสะสมถึงปัจจุบัน</td><td>${M(R[R.length-1].cum)}</td></tr></tfoot></table></div>`)})()}
+ ${sec('ผู้ค้ำประกัน',((l.guar||[]).length?'<div class="tx">'+l.guar.map(g=>'• '+esc(g)).join('\n')+'</div>':'<div class="cal">ไม่มี</div>')+att(l,'guarantee'))}
+ ${sec('รายละเอียดสัญญาจำนอง',`<div class="tx">${esc(l.mort)||'-'}</div>${att(l,'mortgage')}`)}
  ${sec('NOTE',`<div class="tx nt">${esc(l.note)||'-'}</div>`)}</div>`;
 }
-function del(id){if(S.del!==id){S.del=id;show();return}S.sel=null;S.del=null;if(DB)wr(DB.doc('loans/'+id).delete());else{D.loans=D.loans.filter(x=>x.id!==id);persist()}all()}
+function del(id){if(S.del!==id){S.del=id;show();return}S.sel=null;S.del=null;if(DB)wr(DB.doc('loans/'+id).delete());else{const dl=D.loans.find(x=>x.id===id);((dl&&dl.files)||[]).forEach(f=>idbDel(f.id));D.loans=D.loans.filter(x=>x.id!==id);persist()}all()}
 let E;
 function edit(id){
  const o=D.loans.find(x=>x.id===id);
@@ -284,7 +384,7 @@ function edit(id){
 function fm(){
  const v=(k,x)=>`value="${esc(x)}"`;
  $('mo').innerHTML=`<div class="md"><div class="mb fm"><h2 style="margin:0">${E._new?'เพิ่มสัญญาใหม่':'แก้ไขสัญญา'}</h2>
- <div class="g2"><div><label>สัญญาที่</label><input id="e_no" ${v('',E.no)}></div><div><label>สถานะ</label><select id="e_st">${ST.map(s=>`<option ${s===E.status?'selected':''}>${s}</option>`).join('')}</select></div><div><label>เงินปากถุง (%)</label><input id="e_fee" type="number" step="0.1" ${v('',E.fee)}></div><div><label>วิธีคิดดอกเบี้ย</label><select id="e_calc"><option value="month" ${E.calc!=='day'?'selected':''}>รายเดือน (÷12)</option><option value="day" ${E.calc==='day'?'selected':''}>ตามจำนวนวันจริง (÷365)</option></select></div></div>
+ <div class="g2"><div><label>สัญญาที่</label><input id="e_no" ${v('',E.no)}></div><div><label>สถานะ</label><select id="e_st">${ST.map(s=>`<option ${s===E.status?'selected':''}>${s}</option>`).join('')}</select></div><div><label>เงินปากถุง (%)</label><input id="e_fee" type="number" step="0.1" ${v('',E.fee)}></div><div><label>วิธีคิดดอกเบี้ย</label><select id="e_calc"><option value="month" ${E.calc!=='day'?'selected':''}>รายเดือน (÷12)</option><option value="day" ${E.calc==='day'?'selected':''}>คิดตามจำนวนวันของเดือน ÷ 365 (เดือนปฏิทิน)</option></select></div></div>
  <label>ผู้กู้</label><textarea id="e_b" rows="2">${esc(E.borrower)}</textarea>
  <label>เงินต้นแยกตามผู้ให้กู้ (บาท)</label><div class="lg">${D.lenders.map((x,i)=>`<div><span class="cal">${esc(x.n)}${x.main?' ★':''}</span><input type="number" class="la" data-n="${esc(x.n)}" value="${E.amt[x.n]||''}"></div>`).join('')}</div>
  <div style="display:flex;gap:6px;margin-top:6px"><input id="nl" placeholder="เพิ่มชื่อผู้ให้กู้ใหม่"><button class="btn sm" onclick="addL()">เพิ่ม</button></div>
@@ -314,11 +414,49 @@ function ok(){
  S.sel=E.id;saveLoan(E);$('mo').innerHTML='';all();
 }
 async function backup(){
- if(!confirm('ไฟล์ส่งออกนี้ไม่เข้ารหัส ใครได้ไปก็อ่านข้อมูลสัญญาได้ ต้องการส่งออกต่อหรือไม่?\n(ถ้าต้องการสำรองแบบปลอดภัย ให้ใช้ปุ่ม 💾 สำรองลงไฟล์)'))return;
- if(await sendFile(JSON.stringify(D,null,1),'loan-export-'+todayS+'.json'))flash('ส่งออกแล้ว (ไม่เข้ารหัส) เก็บรักษาให้ปลอดภัย');
+ if(!confirm('ไฟล์ส่งออกนี้ไม่เข้ารหัส ใครได้ไปก็อ่านข้อมูลสัญญาได้ และไม่รวมเอกสารแนบ ต้องการส่งออกต่อหรือไม่?\n(ถ้าต้องการสำรองแบบปลอดภัย ให้ใช้ปุ่ม 💾 สำรองลงไฟล์)'))return;
+ if(await sendFile(JSON.stringify({...D,loans:D.loans.map(l=>{const c={...l};delete c.files;return c})},null,1),'loan-export-'+todayS+'.json'))flash('ส่งออกแล้ว (ไม่เข้ารหัส) เก็บรักษาให้ปลอดภัย');
 }
-function imp(i){
- const f=i.files[0];if(!f)return;const r=new FileReader();
+// ปุ่ม "นำเข้า": รับได้ทั้งไฟล์ส่งออกแบบไม่เข้ารหัส และไฟล์สำรองแบบเข้ารหัส (.lvb / .json จากปุ่มสำรองลงไฟล์)
+async function imp(i){
+ const f=i.files[0];i.value='';if(!f)return;
+ let encd=false;
+ try{
+  if(String.fromCharCode(...new Uint8Array(await f.slice(0,4).arrayBuffer()))==='LVB3')encd=true;
+  else encd=/"app"\s*:\s*"loanVault"/.test(await f.slice(0,300).text());
+ }catch(e){flash('อ่านไฟล์ไม่ได้');return}
+ if(encd)askRestore(f);else impPlain(f);
+}
+function askRestore(f){
+ $('mo').innerHTML=`<div class="md"><div class="mb fm" style="max-width:420px"><h2 style="margin:0">นำเข้าไฟล์สำรอง</h2>
+ <div class="cal">ไฟล์: ${esc(f.name)} (${fsz(f.size)}) เป็นไฟล์สำรองแบบเข้ารหัส ใส่รหัสผ่านที่ใช้ตอนสำรองไฟล์นี้ ข้อมูลและเอกสารแนบในเครื่องนี้จะถูกแทนที่ และรหัสผ่านของเครื่องนี้จะเปลี่ยนเป็นรหัสผ่านของไฟล์สำรอง</div>
+ <label>รหัสผ่านของไฟล์สำรอง</label><input id="rpw" type="password" autocomplete="current-password" onkeydown="if(event.key=='Enter')doRestore()">
+ <div id="re" class="cal" style="color:var(--er);min-height:18px;margin-top:6px"></div>
+ <div class="ft"><button class="btn" onclick="$('mo').innerHTML='';RF=null">ยกเลิก</button><button class="btn p" id="rbtn" onclick="doRestore()">กู้คืน</button></div></div></div>`;
+ RF=f;setTimeout(()=>$('rpw').focus(),50);
+}
+let RF=null;
+async function doRestore(){
+ const pw=$('rpw').value,re=$('re'),f=RF;re.textContent='';
+ if(!f)return;if(!pw){re.textContent='กรุณาใส่รหัสผ่าน';return}
+ $('rbtn').disabled=true;re.style.color='var(--mu)';re.textContent='กำลังกู้คืน… รอสักครู่';
+ const fail=m=>{re.style.color='var(--er)';re.textContent=m;$('rbtn').disabled=false};
+ let bk,r;
+ try{bk=await readBackup(f)}catch(e){return fail('อ่านไฟล์ไม่สำเร็จ ไฟล์อาจเสียหายหรือใหญ่เกินกว่าที่เบราว์เซอร์จะอ่านได้')}
+ if(!bk||!(bk.v&&bk.v.s&&bk.v.i&&bk.v.d))return fail('ไฟล์นี้ไม่ใช่ไฟล์สำรองที่ถูกต้อง หรือเสียหายมากเกินกว่าจะกู้ได้');
+ try{r=await openVault(bk.v,pw)}catch(e){await wait();return fail('รหัสผ่านไม่ถูกต้อง (ต้องใช้รหัสผ่านของไฟล์สำรองนี้)')}
+ const need=(r.d.loans||[]).flatMap(l=>l.files||[]),have=new Set(bk.files.filter(x=>x.ok).map(x=>x.id)),miss=need.filter(m=>!have.has(m.id));
+ if(D.loans.length&&!confirm('สัญญาและเอกสารแนบในเครื่องนี้จะถูกแทนที่ด้วยข้อมูลจากไฟล์สำรอง ดำเนินการต่อหรือไม่?')){$('rbtn').disabled=false;re.textContent='';return}
+ if((bk.salvaged||miss.length)&&!confirm('ไฟล์สำรองนี้ไม่สมบูรณ์ จะกู้ข้อมูลสัญญาได้ แต่เอกสารแนบกู้ได้ '+(need.length-miss.length)+' จาก '+need.length+' ไฟล์ ไฟล์ที่ขาดต้องแนบใหม่ ดำเนินการต่อหรือไม่?')){$('rbtn').disabled=false;re.textContent='';return}
+ try{await idbClear();for(const x of bk.files){if(!x.ok)continue;await idbPut({id:x.id,iv:ub(x.iv),ct:await fileCt(bk,x)})}}catch(e){return fail('กู้คืนเอกสารแนบไม่สำเร็จ (พื้นที่เก็บข้อมูลของเบราว์เซอร์ไม่พอ หรือใช้โหมดส่วนตัว)')}
+ KEY=r.k;SALT=r.sl;D=r.d;S.sel=null;
+ try{await seal()}catch(e){return fail('บันทึกลงเครื่องนี้ไม่ได้')}
+ lsSet(BK,String(Date.now()));RF=null;$('mo').innerHTML='';
+ flash(miss.length?'นำเข้าแล้ว แต่เอกสารแนบขาด '+miss.length+' ไฟล์ (ดูเครื่องหมาย ⚠ แล้วแนบใหม่)':'นำเข้าสำเร็จ: '+D.loans.length+' สัญญา'+(need.length?' และเอกสารแนบ '+need.length+' ไฟล์':'')+' · รหัสผ่านเครื่องนี้เปลี่ยนเป็นรหัสของไฟล์สำรองแล้ว');
+ updUp();all();refreshKeys();
+}
+function impPlain(f){
+ const r=new FileReader();
  r.onerror=()=>flash('อ่านไฟล์ไม่ได้');
  r.onload=async()=>{try{
   let x=JSON.parse(String(r.result).replace(/^\uFEFF/,''));
@@ -327,12 +465,13 @@ function imp(i){
   const loans=(x.loans||[]).map(l=>l.amtList?fromDoc(l):{...l,amt:l.amt||{},rounds:l.rounds||[],guar:l.guar||[]});
   if(!loans.length){flash('ไฟล์นี้ไม่มีสัญญาเลย (ไฟล์สำรองว่าง) ลองสำรองข้อมูลใหม่จากต้นทาง');return}
   if(D.loans.length&&!confirm('การนำเข้าจะแทนที่สัญญาทั้งหมดที่มีอยู่ในเครื่องนี้ ต้องการดำเนินการต่อหรือไม่?'))return;
+  loans.forEach(l=>{delete l.files});
   const lenders=x.lenders||[];
   loans.forEach((l,k)=>{if(!l.id)l.id='i'+Date.now()+k;Object.keys(l.amt||{}).forEach(n=>{if(!lenders.some(y=>y.n===n))lenders.push({n,main:0})})});
-  if(!DB){D.lenders=lenders;D.loans=loans;persist();all();flash('นำเข้าแล้ว '+loans.length+' สัญญา');return}
+  if(!DB){await idbClear().catch(()=>{});D.lenders=lenders;D.loans=loans;persist();all();flash('นำเข้าแล้ว '+loans.length+' สัญญา');return}
   D.lenders=lenders;await saveLenders();for(const l of loans)await saveLoan(l);flash('นำเข้าแล้ว '+loans.length+' สัญญา')
  }catch(e){flash('นำเข้าไม่สำเร็จ: ไฟล์ไม่ใช่ JSON ที่ถูกต้อง')}};
- r.readAsText(f);i.value='';
+ r.readAsText(f);
 }
 function all(){sumry();list();show()}
 all();boot();
